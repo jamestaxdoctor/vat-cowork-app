@@ -34,7 +34,6 @@ const VAT_DOCUMENTS = [
   { key: "bankStatements", label: "Bank statement(s) for the quarter" },
   { key: "salesInvoices", label: "Sales invoices / income records" },
   { key: "purchaseInvoices", label: "Purchase invoices / expense receipts" },
-  { key: "previousReturn", label: "Previous VAT return (for comparison)" },
   { key: "clientNotes", label: "Client notes / emails about the quarter" },
   { key: "cisStatements", label: "CIS statements (construction industry)" },
   { key: "importExport", label: "Import/export documentation" },
@@ -46,7 +45,6 @@ const SYNC_ITEMS = [
   { key: "xlsx", label: "Client's spreadsheet is in .xlsx format (not .gsheet)" },
   { key: "irisTemplate", label: "IRIS VAT Template - Bridging.xlsx is in the Cowork Templates folder (Shared Drive)" },
   { key: "supporting", label: "Any supporting documents are in the folder (bank statements, invoices)" },
-  { key: "prevReturn", label: "Previous period's VAT return is in the folder (if comparing)" },
   { key: "cowork", label: "Claude Desktop is open and set to Cowork mode" },
 ];
 
@@ -72,6 +70,7 @@ const EMPTY_DATA = {
   periodFrom: "",
   periodTo: "",
   mtd: false,
+  comparePrev: true,
   preparedBy: "",
   documents: {},
   rules: {
@@ -172,7 +171,7 @@ function derivePeriodDates(endMonth, endYear) {
 
 // ── Prompt generation ───────────────────────────────────
 function generatePrompt(data) {
-  const { client, vatNumber, vatScheme, flatRatePercent, clientYEMonth, periodLabel, periodFrom, periodTo, mtd, preparedBy, endMonth, endYear, documents, rules } = data;
+  const { client, vatNumber, vatScheme, flatRatePercent, clientYEMonth, periodLabel, periodFrom, periodTo, mtd, comparePrev, preparedBy, endMonth, endYear, documents, rules } = data;
 
   const scheme = VAT_SCHEMES.find(s => s.key === vatScheme);
   const docList = VAT_DOCUMENTS.filter(d => documents[d.key] === "yes").map(d => d.label).join(", ");
@@ -297,9 +296,12 @@ function generatePrompt(data) {
   prompt += `• Box 5 (net VAT) makes sense given the client's business.\n`;
 
   // Step 5 — Comparison with previous period
-  if (documents.previousReturn === "yes") {
+  if (comparePrev) {
+    const prevPath = buildPrevQuarterPath(client, endMonth, endYear, clientYEMonth);
     prompt += `\n\nStep 5 — Period-on-Period Comparison\n`;
-    prompt += `Compare the calculated Box 1–9 figures with the previous period's return. Flag any significant variances (±20% or more on any box) and provide a brief explanation of likely causes. Record these in the Notes sheet.\n`;
+    prompt += `Navigate to the previous quarter's folder: ${prevPath}\n`;
+    prompt += `Find the completed IRIS VAT Template or Cowork_Notes from that quarter. Compare the Box 1–9 figures with this period's figures. Flag any significant variances (±20% or more on any box) and provide a brief explanation of likely causes. Record these in the Notes sheet.\n`;
+    prompt += `If the previous quarter's folder doesn't exist or contains no completed return, note this and skip the comparison.\n`;
   }
 
   // Client-specific rules
@@ -316,7 +318,7 @@ function generatePrompt(data) {
   }
 
   // Final step — Cowork Notes
-  const lastStep = documents.previousReturn === "yes" ? 6 : 5;
+  const lastStep = comparePrev ? 6 : 5;
   prompt += `\nStep ${lastStep} — Produce Cowork_Notes\n`;
   prompt += `Create a Cowork_Notes document in the client's VAT folder containing:\n`;
   prompt += `• Client name, VAT number, period\n`;
@@ -357,6 +359,17 @@ function buildFolderPath(clientName, qeMonth, qeYear, clientYEMonth) {
   const { yeLabel, qeLabel } = deriveYEFolder(qeMonth, qeYear, clientYEMonth);
   if (!yeLabel || !qeLabel) return "";
   return `${clientName} / VAT / ${yeLabel} / ${qeLabel}`;
+}
+
+function buildPrevQuarterPath(clientName, qeMonth, qeYear, clientYEMonth) {
+  if (!clientName || !qeMonth || !qeYear || !clientYEMonth) return "";
+  const qm = parseInt(qeMonth);
+  const qy = parseInt(qeYear);
+  // Go back 3 months
+  let prevMonth = qm - 3;
+  let prevYear = qy;
+  if (prevMonth <= 0) { prevMonth += 12; prevYear -= 1; }
+  return buildFolderPath(clientName, String(prevMonth), String(prevYear), clientYEMonth);
 }
 
 // ── Reusable components ───────────────────────────────────
@@ -435,6 +448,7 @@ export default function VATCoworkApp() {
   const [clients, setClients] = useState([]);
   const [jobStatuses, setJobStatuses] = useState({});
   const [notification, setNotification] = useState(null);
+  const [clientSearch, setClientSearch] = useState("");
 
   useEffect(() => {
     const load = async () => {
@@ -570,7 +584,7 @@ export default function VATCoworkApp() {
 
         {/* Actions */}
         <div style={{ padding: "32px 32px 16px" }}>
-          <button onClick={() => startNewJob()} style={{
+          <button onClick={() => { setClientSearch(""); setView("clientPicker"); }} style={{
             width: "100%", padding: "20px 24px", background: C.accentBg, border: `2px solid ${C.accentBorder}`,
             color: C.accent, fontSize: 16, fontFamily: "inherit", cursor: "pointer", textAlign: "left", borderRadius: 2,
             display: "flex", alignItems: "center", gap: 16,
@@ -578,34 +592,10 @@ export default function VATCoworkApp() {
             <span style={{ fontSize: 24, lineHeight: 1 }}>+</span>
             <div>
               <div style={{ fontSize: 15 }}>New VAT Review Job</div>
-              <div style={{ fontSize: 12, color: C.textLight, marginTop: 2 }}>Start the wizard for a new quarterly VAT review</div>
+              <div style={{ fontSize: 12, color: C.textLight, marginTop: 2 }}>Select a client and start the wizard</div>
             </div>
           </button>
         </div>
-
-        {/* Saved clients */}
-        {clients.length > 0 && (
-          <div style={{ padding: "0 32px 24px" }}>
-            <div style={{ fontSize: 11, fontFamily: C.mono, color: C.textLight, letterSpacing: "0.1em", textTransform: "uppercase", marginBottom: 10 }}>Saved Clients</div>
-            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-              {clients.map((c, i) => (
-                <button key={i} onClick={() => startNewJob(c)} style={{
-                  display: "flex", alignItems: "center", justifyContent: "space-between", padding: "12px 16px",
-                  background: C.surface, border: `1px solid ${C.border}`, cursor: "pointer", textAlign: "left", borderRadius: 2, width: "100%",
-                }}>
-                  <div>
-                    <div style={{ fontSize: 14, color: C.text }}>{c.name}</div>
-                    <div style={{ fontSize: 11, color: C.textLight, fontFamily: C.mono, marginTop: 2 }}>
-                      {c.vatNumber || "No VAT no."} · {VAT_SCHEMES.find(s => s.key === c.vatScheme)?.label || c.vatScheme}
-                      {c.mtd && " · MTD"}
-                    </div>
-                  </div>
-                  <span style={{ color: C.accent, fontSize: 12 }}>Start →</span>
-                </button>
-              ))}
-            </div>
-          </div>
-        )}
 
         {/* Job tracker */}
         <div style={{ padding: "0 32px 32px" }}>
@@ -653,6 +643,68 @@ export default function VATCoworkApp() {
               })}
             </div>
           )}
+        </div>
+      </div>
+    );
+  }
+
+  // ── Render: Client Picker ───────────────────────────────────
+  if (view === "clientPicker") {
+    const filtered = clients.filter(c => c.name.toLowerCase().includes(clientSearch.toLowerCase()));
+    return (
+      <div style={{ minHeight: "100vh", background: C.bg, fontFamily: "'Georgia', 'Times New Roman', serif", color: C.text, padding: 0 }}>
+        {/* Header */}
+        <div style={{ borderBottom: `1px solid ${C.border}`, padding: "16px 32px", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+          <button onClick={() => setView("home")} style={{ background: "none", border: "none", color: C.textLight, cursor: "pointer", fontSize: 13, fontFamily: "inherit", padding: 0 }}>← Back</button>
+          <div style={{ fontSize: 11, fontFamily: C.mono, color: C.textLight, letterSpacing: "0.1em" }}>SELECT CLIENT</div>
+        </div>
+
+        <div style={{ padding: "20px 32px 8px" }}>
+          <h2 style={{ fontSize: 22, fontWeight: 400, margin: 0, color: C.text, letterSpacing: "-0.02em" }}>Choose a client</h2>
+        </div>
+
+        {/* Search */}
+        <div style={{ padding: "8px 32px 16px" }}>
+          <Input value={clientSearch} onChange={setClientSearch} placeholder="Search clients..." />
+        </div>
+
+        {/* Client list */}
+        <div style={{ padding: "0 32px 24px" }}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            {filtered.map((c, i) => {
+              const yeMonth = MONTHS.find(m => m.key === parseInt(c.clientYEMonth));
+              return (
+                <button key={i} onClick={() => startNewJob(c)} style={{
+                  display: "flex", alignItems: "center", justifyContent: "space-between", padding: "12px 16px",
+                  background: C.surface, border: `1px solid ${C.border}`, cursor: "pointer", textAlign: "left", borderRadius: 2, width: "100%",
+                }}>
+                  <div>
+                    <div style={{ fontSize: 14, color: C.text }}>{c.name}</div>
+                    <div style={{ fontSize: 11, color: C.textLight, fontFamily: C.mono, marginTop: 2 }}>
+                      {c.vatNumber || "No VAT no."} · {VAT_SCHEMES.find(s => s.key === c.vatScheme)?.label || c.vatScheme}
+                      · YE {yeMonth ? yeMonth.short : "Mar"}
+                    </div>
+                  </div>
+                  <span style={{ color: C.accent, fontSize: 12 }}>Start →</span>
+                </button>
+              );
+            })}
+            {filtered.length === 0 && (
+              <div style={{ padding: "20px 16px", color: C.textLight, fontSize: 13, textAlign: "center" }}>
+                No clients match "{clientSearch}"
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* New client option */}
+        <div style={{ padding: "0 32px 32px" }}>
+          <button onClick={() => startNewJob()} style={{
+            width: "100%", padding: "14px 16px", background: "transparent", border: `1px dashed ${C.border}`,
+            color: C.textLight, fontSize: 13, fontFamily: "inherit", cursor: "pointer", borderRadius: 2, textAlign: "center",
+          }}>
+            + Add new client manually
+          </button>
         </div>
       </div>
     );
@@ -766,6 +818,27 @@ export default function VATCoworkApp() {
                 justifyContent: "center", flexShrink: 0, fontSize: 10, color: "#fff", borderRadius: 2,
               }}>{data.mtd ? "✓" : ""}</span>
               <span style={{ fontSize: 13, color: data.mtd ? C.text : C.textMid }}>This period falls under MTD for VAT</span>
+            </button>
+          </Field>
+          <Field label="Compare with previous quarter">
+            <button onClick={() => update("comparePrev", !data.comparePrev)} style={{
+              display: "flex", alignItems: "center", gap: 10, padding: "10px 16px",
+              background: data.comparePrev ? C.accentBg : C.surface, border: `1px solid ${data.comparePrev ? C.accentBorder : C.border}`,
+              cursor: "pointer", borderRadius: 2, width: "100%", textAlign: "left",
+            }}>
+              <span style={{
+                width: 16, height: 16, border: `1.5px solid ${data.comparePrev ? C.accent : C.borderStrong}`,
+                background: data.comparePrev ? C.accent : "transparent", display: "flex", alignItems: "center",
+                justifyContent: "center", flexShrink: 0, fontSize: 10, color: "#fff", borderRadius: 2,
+              }}>{data.comparePrev ? "✓" : ""}</span>
+              <div>
+                <span style={{ fontSize: 13, color: data.comparePrev ? C.text : C.textMid }}>Compare Box 1–9 figures against the previous quarter's return</span>
+                {data.comparePrev && data.client && data.endMonth && data.endYear && (() => {
+                  const prevPath = buildPrevQuarterPath(data.client, data.endMonth, data.endYear, data.clientYEMonth);
+                  if (!prevPath) return null;
+                  return <div style={{ fontSize: 11, fontFamily: C.mono, color: C.textLight, marginTop: 4 }}>Cowork will look in: {prevPath}</div>;
+                })()}
+              </div>
             </button>
           </Field>
           <Field label="Prepared by">
